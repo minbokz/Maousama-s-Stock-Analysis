@@ -6,14 +6,13 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
 import yfinance as yf
-import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
+from groq import AsyncGroq
 
 load_dotenv()
 
@@ -46,21 +45,18 @@ else:
         logger.error(f"Failed to initialize Supabase client: {e}")
         supabase = None
 
-# ---------- DeepSeek 初始化 ----------
-deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
-deepseek_client = None
-if not deepseek_api_key:
-    logger.warning("DeepSeek API key missing. LLM analysis disabled.")
+# ---------- Groq 初始化（免费，全球可用）----------
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+groq_client = None
+if not GROQ_API_KEY:
+    logger.warning("Groq API key missing. LLM analysis disabled.")
 else:
     try:
-        deepseek_client = AsyncOpenAI(
-            api_key=deepseek_api_key,
-            base_url="https://api.deepseek.com/v1"
-        )
-        logger.info("DeepSeek client initialized.")
+        groq_client = AsyncGroq(api_key=GROQ_API_KEY)
+        logger.info("Groq client initialized.")
     except Exception as e:
-        logger.error(f"Failed to initialize DeepSeek client: {e}")
-        deepseek_client = None
+        logger.error(f"Failed to initialize Groq client: {e}")
+        groq_client = None
 
 # ---------- yfinance 符号标准化 ----------
 def normalize_symbol(symbol: str) -> str:
@@ -72,27 +68,21 @@ def normalize_symbol(symbol: str) -> str:
     - 美股：直接大写
     """
     symbol = symbol.upper().strip()
-    # 已有正确后缀
     if symbol.endswith(('.SS', '.SZ', '.HK')):
         return symbol
-    # sh. 或 sz. 前缀
     if symbol.startswith('SH.'):
         return symbol[3:] + '.SS'
     if symbol.startswith('SZ.'):
         return symbol[3:] + '.SZ'
-    # 纯数字6位 A股
     if symbol.isdigit() and len(symbol) == 6:
         if symbol.startswith(('6', '9')):
             return f"{symbol}.SS"
         else:
             return f"{symbol}.SZ"
-    # 纯数字4位港股（补齐前导零）
     if symbol.isdigit() and len(symbol) == 4:
         return f"{symbol}.HK"
     if symbol.isdigit() and len(symbol) < 4:
-        # 例如 "700" -> "0700.HK"
         return symbol.zfill(4) + ".HK"
-    # 其他（美股）直接返回
     return symbol
 
 def _fetch_stock_data_sync(symbol: str) -> Optional[Dict[str, Any]]:
@@ -102,26 +92,21 @@ def _fetch_stock_data_sync(symbol: str) -> Optional[Dict[str, Any]]:
 
     try:
         ticker = yf.Ticker(yf_symbol)
-        # 获取公司信息
         info = ticker.info
         if not info or (info.get('regularMarketPrice') is None and info.get('currentPrice') is None):
             logger.warning(f"No info data for {yf_symbol}, trying to use history only")
         
-        # 获取最近一个月的历史数据
         hist = ticker.history(period="1mo")
         if hist.empty:
             logger.error(f"No historical data for {yf_symbol}")
             return None
 
-        # 提取公司名称
         company_name = info.get('longName') or info.get('shortName') or ''
         
-        # 当前价格：优先使用 info 中的实时价格，否则使用历史最新收盘价
         current_price = info.get('regularMarketPrice') or info.get('currentPrice')
         if current_price is None and not hist.empty:
             current_price = hist['Close'].iloc[-1]
         
-        # 前收盘价：优先使用 info，否则用历史倒数第二天的收盘价
         previous_close = info.get('regularMarketPreviousClose') or info.get('previousClose')
         if previous_close is None and len(hist) >= 2:
             previous_close = hist['Close'].iloc[-2]
@@ -130,29 +115,22 @@ def _fetch_stock_data_sync(symbol: str) -> Optional[Dict[str, Any]]:
             logger.error(f"Insufficient price data for {yf_symbol}")
             return None
 
-        # 计算涨跌幅
         day_change_percent = ((current_price - previous_close) / previous_close) * 100
         
-        # 成交量
         volume = info.get('regularMarketVolume')
         if volume is None and not hist.empty:
             volume = int(hist['Volume'].iloc[-1])
         
-        # 市值和市盈率
         market_cap = info.get('marketCap')
         pe_ratio = info.get('trailingPE') or info.get('forwardPE')
         
-        # 历史价格（最近30天，升序）
-        # hist 索引为日期，按时间升序排列
         hist_sorted = hist.sort_index()
-        # 取最近30天（如果不足30天则全部）
         recent_hist = hist_sorted.tail(30)
         historical_prices = [
             {"date": date.strftime("%Y-%m-%d"), "close": round(row['Close'], 2)}
             for date, row in recent_hist.iterrows()
         ]
         
-        # 最近5日收盘价（从旧到新）
         last_5 = hist_sorted.tail(5)
         recent_5d_close = [round(val, 2) for val in last_5['Close'].tolist()]
         
@@ -183,10 +161,10 @@ class AnalyzeRequest(BaseModel):
 class SaveStockRequest(BaseModel):
     symbol: str
 
-# ---------- LLM 分析 ----------
+# ---------- Groq LLM 分析 ----------
 async def analyze_with_llm(stock_data: Dict[str, Any]) -> Dict[str, str]:
-    if not deepseek_client:
-        raise HTTPException(status_code=503, detail="LLM service not configured")
+    if not groq_client:
+        raise HTTPException(status_code=503, detail="LLM service not configured (Groq API key missing)")
 
     system_prompt = (
         "You are a strict JSON-only financial analyst. "
@@ -215,8 +193,8 @@ Output ONLY the JSON object. Example:
 {{"summary": "Strong upward trend with high volume.", "sentiment": "Bullish", "risk_level": "Medium"}}
 """
     try:
-        response = await deepseek_client.chat.completions.create(
-            model="deepseek-chat",
+        response = await groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",  # 免费模型，速度快
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -275,8 +253,15 @@ async def analyze_stock(req: AnalyzeRequest):
         supabase.table("stock_analyses").insert(record).execute()
         logger.info(f"Stored analysis for {symbol} to Supabase")
     except Exception as e:
-        logger.error(f"Supabase storage error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to store analysis: {str(e)}")
+        error_msg = str(e)
+        logger.error(f"Supabase storage error: {error_msg}")
+        # 特别处理 RLS 错误
+        if "row-level security policy" in error_msg.lower():
+            raise HTTPException(
+                status_code=403,
+                detail="Supabase Row Level Security (RLS) is enabled. Please disable RLS for 'stock_analyses' table in Supabase dashboard (Authentication → Policies → Disable RLS)."
+            )
+        raise HTTPException(status_code=500, detail=f"Failed to store analysis: {error_msg}")
     
     return analysis
 
@@ -300,12 +285,17 @@ async def save_stock_data(req: SaveStockRequest):
         logger.info(f"Manually saved stock snapshot for {symbol} to Supabase")
         return {"status": "success", "message": f"Stock data for {symbol} saved successfully."}
     except Exception as e:
-        logger.error(f"Supabase save error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to save stock data: {str(e)}")
+        error_msg = str(e)
+        logger.error(f"Supabase save error: {error_msg}")
+        if "row-level security policy" in error_msg.lower():
+            raise HTTPException(
+                status_code=403,
+                detail="Supabase Row Level Security (RLS) is enabled. Please disable RLS for 'stock_snapshots' table in Supabase dashboard (Authentication → Policies → Disable RLS)."
+            )
+        raise HTTPException(status_code=500, detail=f"Failed to save stock data: {error_msg}")
 
 @app.get("/health")
 async def health():
-    # 检查 yfinance 是否可用（尝试获取一个通用股票）
     yfinance_ok = False
     try:
         test = yf.Ticker("AAPL")
@@ -316,7 +306,7 @@ async def health():
     
     deps = {
         "supabase": supabase is not None,
-        "deepseek": deepseek_client is not None,
+        "groq": groq_client is not None,
         "yfinance": yfinance_ok
     }
     return {"status": "ok", "dependencies": deps}
@@ -325,7 +315,7 @@ async def health():
 async def root():
     return HTML_CONTENT
 
-# ---------- 前端 HTML （与原版相同，无需修改）----------
+# ---------- 前端 HTML ----------
 HTML_CONTENT = """
 <!DOCTYPE html>
 <html lang="en">
@@ -684,4 +674,4 @@ HTML_CONTENT = """
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="127.0.0.1", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port)
