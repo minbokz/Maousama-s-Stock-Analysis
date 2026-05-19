@@ -6,7 +6,7 @@
 
 ## 🚀 在线访问
 
-**[点击体验 →](https://maousama-s-stock-analysis.onrender.com/)**  
+**[点击体验](https://maousama-s-stock-analysis.onrender.com/)**  
 
 ---
 
