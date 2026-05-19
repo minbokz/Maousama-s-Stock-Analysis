@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any
 
 import yfinance as yf
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response  # 新增 Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
@@ -264,7 +264,6 @@ async def analyze_stock(req: AnalyzeRequest):
             "stock_data": stock_data,
             "analysis_result": analysis,
             "created_at": datetime.now(timezone.utc).isoformat()
-            # 移除了 "language" 字段，避免表结构不匹配
         }
         supabase.table("stock_analyses").insert(record).execute()
         logger.info(f"Stored analysis for {symbol} to Supabase")
@@ -329,6 +328,11 @@ async def health():
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return HTML_CONTENT
+
+# 新增 HEAD 路由，解决 UptimeRobot 和保活程序误报问题
+@app.head("/")
+async def head_root():
+    return Response()  # 空响应，状态码默认 200
 
 # ---------- 前端 HTML（带中英文切换）----------
 HTML_CONTENT = """
