@@ -2,10 +2,11 @@ import os
 import json
 import logging
 import asyncio
-from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, List
+from datetime import datetime, timezone
+from typing import Optional, Dict, Any
 
-import baostock as bs
+import yfinance as yf
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,7 +43,7 @@ else:
         supabase = create_client(supabase_url, supabase_key)
         logger.info("Supabase client initialized successfully.")
     except Exception as e:
-        logger.error(f"Failed to initialize Supabase client: {e}. Check SUPABASE_URL and SUPABASE_KEY.")
+        logger.error(f"Failed to initialize Supabase client: {e}")
         supabase = None
 
 # ---------- DeepSeek 初始化 ----------
@@ -61,189 +62,128 @@ else:
         logger.error(f"Failed to initialize DeepSeek client: {e}")
         deepseek_client = None
 
+# ---------- yfinance 符号标准化 ----------
+def normalize_symbol(symbol: str) -> str:
+    """
+    将用户输入转换为 yfinance 可识别的格式。
+    支持：
+    - A股：上交所 .SS，深交所 .SZ
+    - 港股：.HK，自动补齐前导零（如 700 -> 0700.HK）
+    - 美股：直接大写
+    """
+    symbol = symbol.upper().strip()
+    # 已有正确后缀
+    if symbol.endswith(('.SS', '.SZ', '.HK')):
+        return symbol
+    # sh. 或 sz. 前缀
+    if symbol.startswith('SH.'):
+        return symbol[3:] + '.SS'
+    if symbol.startswith('SZ.'):
+        return symbol[3:] + '.SZ'
+    # 纯数字6位 A股
+    if symbol.isdigit() and len(symbol) == 6:
+        if symbol.startswith(('6', '9')):
+            return f"{symbol}.SS"
+        else:
+            return f"{symbol}.SZ"
+    # 纯数字4位港股（补齐前导零）
+    if symbol.isdigit() and len(symbol) == 4:
+        return f"{symbol}.HK"
+    if symbol.isdigit() and len(symbol) < 4:
+        # 例如 "700" -> "0700.HK"
+        return symbol.zfill(4) + ".HK"
+    # 其他（美股）直接返回
+    return symbol
 
+def _fetch_stock_data_sync(symbol: str) -> Optional[Dict[str, Any]]:
+    """同步获取股票数据的函数（由 asyncio.to_thread 调用）"""
+    yf_symbol = normalize_symbol(symbol)
+    logger.info(f"Fetching data for {yf_symbol} using yfinance")
+
+    try:
+        ticker = yf.Ticker(yf_symbol)
+        # 获取公司信息
+        info = ticker.info
+        if not info or (info.get('regularMarketPrice') is None and info.get('currentPrice') is None):
+            logger.warning(f"No info data for {yf_symbol}, trying to use history only")
+        
+        # 获取最近一个月的历史数据
+        hist = ticker.history(period="1mo")
+        if hist.empty:
+            logger.error(f"No historical data for {yf_symbol}")
+            return None
+
+        # 提取公司名称
+        company_name = info.get('longName') or info.get('shortName') or ''
+        
+        # 当前价格：优先使用 info 中的实时价格，否则使用历史最新收盘价
+        current_price = info.get('regularMarketPrice') or info.get('currentPrice')
+        if current_price is None and not hist.empty:
+            current_price = hist['Close'].iloc[-1]
+        
+        # 前收盘价：优先使用 info，否则用历史倒数第二天的收盘价
+        previous_close = info.get('regularMarketPreviousClose') or info.get('previousClose')
+        if previous_close is None and len(hist) >= 2:
+            previous_close = hist['Close'].iloc[-2]
+        
+        if current_price is None or previous_close is None:
+            logger.error(f"Insufficient price data for {yf_symbol}")
+            return None
+
+        # 计算涨跌幅
+        day_change_percent = ((current_price - previous_close) / previous_close) * 100
+        
+        # 成交量
+        volume = info.get('regularMarketVolume')
+        if volume is None and not hist.empty:
+            volume = int(hist['Volume'].iloc[-1])
+        
+        # 市值和市盈率
+        market_cap = info.get('marketCap')
+        pe_ratio = info.get('trailingPE') or info.get('forwardPE')
+        
+        # 历史价格（最近30天，升序）
+        # hist 索引为日期，按时间升序排列
+        hist_sorted = hist.sort_index()
+        # 取最近30天（如果不足30天则全部）
+        recent_hist = hist_sorted.tail(30)
+        historical_prices = [
+            {"date": date.strftime("%Y-%m-%d"), "close": round(row['Close'], 2)}
+            for date, row in recent_hist.iterrows()
+        ]
+        
+        # 最近5日收盘价（从旧到新）
+        last_5 = hist_sorted.tail(5)
+        recent_5d_close = [round(val, 2) for val in last_5['Close'].tolist()]
+        
+        return {
+            "symbol": symbol.upper(),
+            "company_name": company_name,
+            "current_price": round(current_price, 2),
+            "previous_close": round(previous_close, 2),
+            "day_change_percent": round(day_change_percent, 2),
+            "volume": volume,
+            "market_cap": market_cap,
+            "pe_ratio": round(pe_ratio, 2) if pe_ratio else None,
+            "recent_5d_close": recent_5d_close,
+            "historical_prices": historical_prices
+        }
+    except Exception as e:
+        logger.error(f"yfinance error for {yf_symbol}: {e}")
+        return None
+
+async def fetch_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
+    """异步包装器，在线程池中执行同步的 yfinance 调用"""
+    return await asyncio.to_thread(_fetch_stock_data_sync, symbol)
+
+# ---------- 请求模型 ----------
 class AnalyzeRequest(BaseModel):
     symbol: str
-
 
 class SaveStockRequest(BaseModel):
     symbol: str
 
-
-def format_stock_code(symbol: str) -> tuple[Optional[str], Optional[str]]:
-    """将用户输入的股票代码转换为 BaoStock 格式，同时返回市场标识"""
-    symbol = symbol.upper().strip()
-    if symbol.startswith(('SH.', 'SH', 'SZ.', 'SZ')):
-        if '.' in symbol:
-            parts = symbol.split('.')
-            if len(parts) == 2:
-                market = parts[0].lower()
-                code = parts[1]
-                return f"{market}.{code}", market
-        if symbol.startswith('SH'):
-            code = symbol[2:]
-            return f"sh.{code}", "sh"
-        elif symbol.startswith('SZ'):
-            code = symbol[2:]
-            return f"sz.{code}", "sz"
-    if symbol.isdigit() and len(symbol) == 6:
-        if symbol.startswith(('6', '9')):
-            return f"sh.{symbol}", "sh"
-        else:
-            return f"sz.{symbol}", "sz"
-    return None, None
-
-
-async def fetch_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
-    """使用 BaoStock 获取股票数据，包含公司名称、市盈率、流通市值及30天历史数据"""
-    bs_code, market = format_stock_code(symbol)
-    if not bs_code:
-        logger.warning(f"Invalid stock code format: {symbol}")
-        return None
-
-    def sync_fetch():
-        lg = bs.login()
-        if lg.error_code != '0':
-            logger.error(f"BaoStock login failed: {lg.error_msg}")
-            return None
-
-        try:
-            # ---------- 1. 获取公司名称 ----------
-            company_name = None
-            rs_basic = bs.query_stock_basic(code=bs_code)
-            basic_df = rs_basic.get_data()
-            if not basic_df.empty and 'code_name' in basic_df.columns:
-                company_name = basic_df.iloc[0]['code_name']
-
-            # ---------- 2. 获取最新交易日 ----------
-            latest_trade_day = None
-            for offset in range(10):
-                check_date = (datetime.now() - timedelta(days=offset)).strftime('%Y-%m-%d')
-                rs_trade = bs.query_trade_dates(start_date=check_date, end_date=check_date)
-                trade_df = rs_trade.get_data()
-                if not trade_df.empty and trade_df.iloc[0]['is_trading_day'] == '1':
-                    latest_trade_day = check_date
-                    break
-            if not latest_trade_day:
-                latest_trade_day = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-
-            # ---------- 3. 获取最近30天K线数据（价格、成交量、市盈率等）----------
-            rs_k = bs.query_history_k_data_plus(
-                bs_code,
-                "date,code,close,preclose,volume,pctChg,peTTM",
-                start_date=(datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'),
-                end_date=latest_trade_day,
-                frequency="d",
-                adjustflag="3"
-            )
-            k_df = rs_k.get_data()
-            if k_df.empty:
-                logger.error(f"No K-line data for {bs_code}")
-                return None
-
-            latest = k_df.iloc[-1]
-            current_price = float(latest['close']) if latest['close'] else None
-            previous_close = float(latest['preclose']) if latest['preclose'] else None
-            day_change = float(latest['pctChg']) if latest['pctChg'] else None
-            volume = int(latest['volume']) if latest['volume'] else None
-
-            pe_ratio = None
-            if latest['peTTM'] and latest['peTTM'] != '':
-                try:
-                    pe_ratio = float(latest['peTTM'])
-                except (ValueError, TypeError):
-                    pass
-
-            # ---------- 4. 获取最新财报中的总股本和流通股本（单位：股） ----------
-            total_shares = None      # 总股本（股）
-            liqa_shares = None       # 流通股本（股）
-
-            # 尝试获取当前年份4个季度的数据，优先使用有数据的最近季度
-            now_year = datetime.now().year
-            profit_data = None
-            for year in [now_year, now_year - 1]:
-                for quarter in [4, 3, 2, 1]:   # 按季度优先级：4→3→2→1
-                    rs_profit = bs.query_profit_data(code=bs_code, year=year, quarter=quarter)
-                    df = rs_profit.get_data()
-                    if not df.empty:
-                        profit_data = df.iloc[0]
-                        break
-                if profit_data is not None:
-                    break
-
-            if profit_data is not None:
-                if 'totalShare' in profit_data and profit_data['totalShare'] not in ('', None, '--'):
-                    try:
-                        total_shares = float(profit_data['totalShare'])
-                    except (ValueError, TypeError):
-                        pass
-                if 'liqaShare' in profit_data and profit_data['liqaShare'] not in ('', None, '--'):
-                    try:
-                        liqa_shares = float(profit_data['liqaShare'])
-                    except (ValueError, TypeError):
-                        pass
-
-            # 如果流通股本获取失败，回退到总股本（并记录警告）
-            effective_shares = liqa_shares if liqa_shares is not None else total_shares
-            if effective_shares is None:
-                logger.warning(f"Could not retrieve any share capital for {bs_code}, market cap will be None")
-            else:
-                if liqa_shares is None:
-                    logger.warning(f"Using total shares instead of float shares for {bs_code} – market cap may be overestimated")
-
-            # 计算流通市值（元）
-            market_cap = None
-            if current_price is not None and effective_shares is not None:
-                market_cap = round(current_price * effective_shares, 0)
-
-            # 最近5日收盘价
-            recent_5d_close = []
-            for i in range(min(5, len(k_df))):
-                close_val = k_df.iloc[-1 - i]['close']
-                if close_val:
-                    recent_5d_close.append(round(float(close_val), 2))
-            recent_5d_close.reverse()
-
-            historical_prices = []
-            for _, row in k_df.iterrows():
-                date_str = row['date']
-                close_val = row['close']
-                if close_val:
-                    historical_prices.append({
-                        "date": date_str,
-                        "close": round(float(close_val), 2)
-                    })
-
-            return {
-                "symbol": symbol.upper(),
-                "company_name": company_name,
-                "current_price": current_price,
-                "previous_close": previous_close,
-                "day_change_percent": day_change,
-                "volume": volume,
-                "market_cap": market_cap,
-                "pe_ratio": pe_ratio,
-                "recent_5d_close": recent_5d_close,
-                "historical_prices": historical_prices
-            }
-        except Exception as e:
-            logger.error(f"BaoStock fetch error: {e}")
-            return None
-        finally:
-            bs.logout()
-
-    try:
-        result = await asyncio.to_thread(sync_fetch)
-        if result:
-            for key, value in result.items():
-                if value is None or (isinstance(value, float) and value != value):
-                    result[key] = None
-        return result
-    except Exception as e:
-        logger.error(f"Async fetch error: {e}")
-        return None
-
-
+# ---------- LLM 分析 ----------
 async def analyze_with_llm(stock_data: Dict[str, Any]) -> Dict[str, str]:
     if not deepseek_client:
         raise HTTPException(status_code=503, detail="LLM service not configured")
@@ -305,14 +245,13 @@ Output ONLY the JSON object. Example:
         logger.error(f"LLM analysis error: {e}")
         raise HTTPException(status_code=500, detail=f"LLM analysis failed: {str(e)}")
 
-
+# ---------- API 端点 ----------
 @app.get("/api/stock/{symbol}")
 async def get_stock(symbol: str):
     data = await fetch_stock_data(symbol)
     if not data or data.get('current_price') is None:
         raise HTTPException(status_code=404, detail="Stock symbol not found. Please try another symbol.")
     return data
-
 
 @app.post("/api/analyze")
 async def analyze_stock(req: AnalyzeRequest):
@@ -341,7 +280,6 @@ async def analyze_stock(req: AnalyzeRequest):
     
     return analysis
 
-
 @app.post("/api/save_stock")
 async def save_stock_data(req: SaveStockRequest):
     symbol = req.symbol.upper()
@@ -365,23 +303,29 @@ async def save_stock_data(req: SaveStockRequest):
         logger.error(f"Supabase save error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to save stock data: {str(e)}")
 
-
 @app.get("/health")
 async def health():
+    # 检查 yfinance 是否可用（尝试获取一个通用股票）
+    yfinance_ok = False
+    try:
+        test = yf.Ticker("AAPL")
+        _ = test.info
+        yfinance_ok = True
+    except Exception:
+        yfinance_ok = False
+    
     deps = {
         "supabase": supabase is not None,
         "deepseek": deepseek_client is not None,
-        "baostock": True
+        "yfinance": yfinance_ok
     }
     return {"status": "ok", "dependencies": deps}
-
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return HTML_CONTENT
 
-
-# ---------- 前端 HTML ----------
+# ---------- 前端 HTML （与原版相同，无需修改）----------
 HTML_CONTENT = """
 <!DOCTYPE html>
 <html lang="en">
@@ -563,7 +507,6 @@ HTML_CONTENT = """
             document.getElementById('stockSection').style.display = 'block';
             document.getElementById('chartSection').style.display = 'block';
             
-            // 延迟渲染图表以确保容器宽度正确
             setTimeout(() => {
                 renderPriceChart(data.historical_prices || []);
             }, 0);
@@ -660,7 +603,7 @@ HTML_CONTENT = """
             const analysis = await response.json();
             displayAnalysis(analysis);
             document.getElementById('analysisSection').style.display = 'block';
-            await fetchStock();  // 刷新最新数据
+            await fetchStock();
         } catch (error) {
             showError(error.message);
         } finally {
@@ -737,3 +680,8 @@ HTML_CONTENT = """
 </body>
 </html>
 """
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="127.0.0.1", port=port)
