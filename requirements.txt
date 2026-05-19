@@ -1,7 +1,7 @@
-fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
-pydantic>=2.0.0
-yfinance>=0.2.0
-openai>=1.0.0
-supabase>=2.0.0
-python-dotenv>=1.0.0
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+openai==1.6.1
+supabase==2.2.0
+python-dotenv==1.0.0
+pydantic==2.13.0
+baostock==0.8.8

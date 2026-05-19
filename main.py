@@ -10,9 +10,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
 from dotenv import load_dotenv
-import baostock as bs
-from openai import AsyncOpenAI
-import uvicorn  # 新增，用于直接运行
 
 load_dotenv()
 
@@ -716,8 +713,3 @@ HTML_CONTENT = """
 </body>
 </html>
 """
-
-# 新增：直接运行入口，适配 Render 的 PORT 环境变量
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="127.0.0.1", port=port)
