@@ -1,16 +1,16 @@
 # Core
-fastapi==0.115.0
-uvicorn[standard]==0.30.0
-pydantic==2.9.2
+fastapi>=0.115.0,<0.116.0
+uvicorn[standard]>=0.30.0,<0.31.0
+pydantic>=2.11.7,<3.0.0
 
 # Stock data
-yfinance==0.2.40
-pandas==2.2.3
+yfinance>=0.2.40,<0.3.0
+pandas>=2.2.3,<2.3.0
 
 # LLM & Supabase
-openai==1.51.0
-supabase==2.28.3
+openai>=1.51.0,<2.0.0
+supabase>=2.28.3,<3.0.0
 
 # Utilities
-python-dotenv==1.0.1
-httpx==0.27.2
+python-dotenv>=1.0.1,<1.1.0
+httpx>=0.27.2,<0.28.0
