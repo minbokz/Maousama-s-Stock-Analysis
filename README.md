@@ -2,11 +2,7 @@
 
 > 全栈股票分析应用：获取实时股票数据，通过 LLM 生成 JSON 格式的投资建议，并持久化到 Supabase。
 
----
-
-## 🚀 在线访问
-
-**[点击体验](https://maousama-s-stock-analysis.onrender.com/)**  
+**[🌐 在线体验](https://maousama-s-stock-analysis.onrender.com/)**  
 
 ---
 
@@ -30,12 +26,15 @@
 
 2. **AI 分析**  
    调用 Groq LLM 分析股票数据，返回严格的 JSON 对象，包含：
-   - `summary`：1-2 句投资建议
+   - `summary`：1-2 句投资建议（支持中英文）
    - `sentiment`：`Bullish` / `Neutral` / `Bearish`
    - `risk_level`：`High` / `Medium` / `Low`
 
 3. **数据持久化**  
    分析结果自动存入 Supabase `stock_analyses` 表，支持手动保存快照到 `stock_snapshots`。
+
+4. **多语言界面**  
+   点击右上角按钮可切换中文/英文，LLM 分析结果也会自动适配语言。
 
 ---
 
@@ -54,7 +53,7 @@ user_prompt = f"""
 Analyze the following stock data and return a JSON object with exactly three fields:
 - "summary": a brief assessment (1-2 sentences)
 - "sentiment": one of "Bullish", "Bearish", or "Neutral"
-- "risk_level": one of "High", "Medium", "Low"
+- "risk_level": one of "High", "Medium", or "Low"
 
 Stock Data:
 - Symbol: {stock_data.get('symbol')}
@@ -83,7 +82,53 @@ response = await groq_client.chat.completions.create(
 )
 ```
 
-> Prompt 截图说明：上述代码即为实际使用的 Prompt。该提示词明确禁止输出任何非 JSON 内容，并配合 response_format 参数，确保 LLM 绝不“乱说话”。
+> 当语言选择为中文时，LLM 的提示词会切换为中文，输出中文的 `summary`，而 `sentiment` 和 `risk_level` 保持英文（便于前端统一映射）。
+
+---
+
+## 🗄️ Supabase 数据库设置
+
+本项目使用 Supabase 作为 PostgreSQL 数据库，需要创建两个表：`stock_analyses`（AI 分析记录）和 `stock_snapshots`（手动保存的快照）。
+
+### 1. 创建表结构
+
+登录 Supabase Dashboard，进入 **SQL Editor**，执行以下 SQL：
+
+```sql
+-- 分析记录表
+CREATE TABLE IF NOT EXISTS stock_analyses (
+  id BIGSERIAL PRIMARY KEY,
+  symbol TEXT NOT NULL,
+  stock_data JSONB NOT NULL,
+  analysis_result JSONB NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 手动保存的快照表
+CREATE TABLE IF NOT EXISTS stock_snapshots (
+  id BIGSERIAL PRIMARY KEY,
+  symbol TEXT NOT NULL,
+  stock_data JSONB NOT NULL,
+  saved_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- （可选）为 symbol 创建索引，加速查询
+CREATE INDEX idx_stock_analyses_symbol ON stock_analyses(symbol);
+CREATE INDEX idx_stock_snapshots_symbol ON stock_snapshots(symbol);
+```
+
+### 2. 禁用 Row Level Security（RLS）
+
+因为后端使用 Supabase 的 `anon` 密钥（公钥）直接写入，为了简化开发流程，需要临时关闭 RLS：
+
+- 在 Supabase Dashboard 左侧菜单 **Authentication → Policies** 中找到 `stock_analyses` 和 `stock_snapshots` 表。
+- 分别点击 **Disable RLS** 按钮（生产环境可后续重新启用并配置安全策略）。
+
+> 如果你希望保持 RLS 开启，可以使用 Supabase 的 `service_role` 密钥（需保存在后端环境变量中，且**绝对不能泄露**）。但本项目的示例代码采用了关闭 RLS 的方式。
+
+### 3. 验证连接
+
+完成上述步骤后，启动应用并尝试查询任意股票，点击 **AI Analyze**，Supabase 中应能正常插入记录。你可以通过 **Table Editor** 直接查看数据。
 
 ---
 
@@ -159,6 +204,7 @@ AI 给出了两种方案：
 
 ---
 
+
 ## 🛠️ 本地运行
 
 ```bash
@@ -192,3 +238,18 @@ python main.py
    - **Start Command**：`uvicorn main:app --host 0.0.0.0 --port $PORT`  
 4. 在 Environment Variables 中添加 `SUPABASE_URL`、`SUPABASE_KEY`、`GROQ_API_KEY`。  
 5. 点击 Deploy，等待部署完成。
+
+---
+
+## 📄 环境变量说明
+
+| 变量名 | 说明 | 获取方式 |
+|--------|------|----------|
+| `SUPABASE_URL` | Supabase 项目 URL | Supabase Dashboard → Project Settings → API |
+| `SUPABASE_KEY` | Supabase `anon` 公钥 | 同上（`anon public` 密钥） |
+| `GROQ_API_KEY` | Groq API 密钥 | [console.groq.com](https://console.groq.com) |
+
+---
+
+
+**Happy Investing! 📊**
