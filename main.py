@@ -164,7 +164,6 @@ async def analyze_with_llm(stock_data: Dict[str, Any], lang: str = "en") -> Dict
         "Only output valid JSON objects."
     )
 
-    # 根据语言构建用户提示
     if lang == "zh":
         user_prompt = f"""
 分析以下股票数据，返回一个包含三个字段的JSON对象：
@@ -264,8 +263,8 @@ async def analyze_stock(req: AnalyzeRequest):
             "symbol": stock_data["symbol"],
             "stock_data": stock_data,
             "analysis_result": analysis,
-            "language": lang,
             "created_at": datetime.now(timezone.utc).isoformat()
+            # 移除了 "language" 字段，避免表结构不匹配
         }
         supabase.table("stock_analyses").insert(record).execute()
         logger.info(f"Stored analysis for {symbol} to Supabase")
@@ -517,7 +516,6 @@ HTML_CONTENT = """
             analyzeBtn: "🤖 AI Analyze",
             saveBtn: "💾 Save to Supabase",
             symbolPlaceholder: "Enter stock code (e.g., 600000, 000001, sh.600000)",
-            // stock info labels
             company: "Company",
             symbol: "Symbol",
             currentPrice: "Current Price",
@@ -527,14 +525,12 @@ HTML_CONTENT = """
             marketCap: "Market Cap",
             peRatio: "P/E Ratio",
             recent5d: "5-Day Close",
-            // sentiment/risk mapping
             sentiment_bullish: "Bullish",
             sentiment_bearish: "Bearish",
             sentiment_neutral: "Neutral",
             risk_high: "High",
             risk_medium: "Medium",
             risk_low: "Low",
-            // misc
             noData: "No historical price data available.",
             errorDefault: "An error occurred. Please try again.",
             saveSuccess: "Stock data saved successfully!",
@@ -581,7 +577,6 @@ HTML_CONTENT = """
     let currentStockData = null;
     let chartInstance = null;
 
-    // DOM 元素
     const langZhBtn = document.getElementById('langZhBtn');
     const langEnBtn = document.getElementById('langEnBtn');
     const fetchBtn = document.getElementById('fetchBtn');
@@ -598,7 +593,6 @@ HTML_CONTENT = """
     const chartSection = document.getElementById('chartSection');
     const analysisSection = document.getElementById('analysisSection');
 
-    // 更新所有静态文本
     function updateUILabels() {
         const t = i18n[currentLocale];
         pageTitle.innerText = t.pageTitle;
@@ -612,7 +606,6 @@ HTML_CONTENT = """
         symbolInput.placeholder = t.symbolPlaceholder;
     }
 
-    // 更新股票数据显示（根据当前语言）
     function displayStockData(data) {
         const t = i18n[currentLocale];
         const formatNumber = (num) => {
@@ -640,7 +633,6 @@ HTML_CONTENT = """
         `;
         document.getElementById('stockData').innerHTML = html;
         
-        // 更新图表标题（如果图表已存在）
         if (chartInstance) {
             const option = chartInstance.getOption();
             option.title[0].text = t.chartTitle.replace('📉 ', '');
@@ -648,7 +640,6 @@ HTML_CONTENT = """
         }
     }
 
-    // 显示分析结果（将 sentiment/risk 翻译显示）
     function displayAnalysis(analysis) {
         const t = i18n[currentLocale];
         let sentimentText = analysis.sentiment;
@@ -678,7 +669,6 @@ HTML_CONTENT = """
         document.getElementById('analysisResult').innerHTML = html;
     }
 
-    // 渲染图表（标题多语言）
     function renderPriceChart(historicalPrices) {
         if (!historicalPrices || historicalPrices.length === 0) {
             const chartDom = document.getElementById('priceChart');
@@ -708,7 +698,6 @@ HTML_CONTENT = """
         window.addEventListener('resize', () => { if (chartInstance) chartInstance.resize(); });
     }
 
-    // 获取股票行情
     async function fetchStock() {
         const symbol = symbolInput.value.trim().toUpperCase();
         if (!symbol) {
@@ -743,7 +732,6 @@ HTML_CONTENT = """
         }
     }
 
-    // AI 分析（携带当前语言）
     async function analyzeStock() {
         let symbol = symbolInput.value.trim().toUpperCase();
         if (!symbol) {
@@ -768,7 +756,6 @@ HTML_CONTENT = """
             const analysis = await response.json();
             displayAnalysis(analysis);
             analysisSection.style.display = 'block';
-            // 同时刷新股票数据确保最新
             await fetchStock();
         } catch (error) {
             showError(error.message);
@@ -778,7 +765,6 @@ HTML_CONTENT = """
         }
     }
 
-    // 保存数据
     async function saveStockData() {
         let symbol = symbolInput.value.trim().toUpperCase();
         if (!symbol) {
@@ -808,11 +794,9 @@ HTML_CONTENT = """
         }
     }
 
-    // 切换语言并刷新界面
     async function setLanguage(lang) {
         if (lang === currentLocale) return;
         currentLocale = lang;
-        // 更新按钮高亮
         if (lang === 'zh') {
             langZhBtn.classList.add('active');
             langEnBtn.classList.remove('active');
@@ -822,7 +806,6 @@ HTML_CONTENT = """
         }
         updateUILabels();
         
-        // 如果已有股票数据显示，则刷新显示
         if (currentStockData) {
             displayStockData(currentStockData);
             if (chartInstance) {
@@ -832,7 +815,6 @@ HTML_CONTENT = """
                 chartInstance.setOption(option);
             }
         }
-        // 如果分析结果显示，重新请求分析（以新语言）
         if (analysisSection.style.display === 'block' && currentSymbol) {
             try {
                 const response = await fetch('/api/analyze', {
@@ -862,7 +844,6 @@ HTML_CONTENT = """
         errorDiv.style.display = 'none';
     }
 
-    // 绑定事件
     fetchBtn.onclick = fetchStock;
     analyzeBtn.onclick = analyzeStock;
     saveBtn.onclick = saveStockData;
