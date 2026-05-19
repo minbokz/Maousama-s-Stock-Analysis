@@ -435,7 +435,7 @@ HTML_CONTENT = """
 <div class="container">
     <div class="card">
         <h1>📈 AI Stock Analysis Panel</h1>
-        <div class="subtitle">Get real-time stock data and AI-powered insights (A股市场)</div>
+        <div class="subtitle">Get real-time stock data and AI-powered insights </div>
         
         <div class="input-group">
             <input type="text" id="symbol" placeholder="Enter stock code (e.g., 600000, 000001, sh.600000)">
