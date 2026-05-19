@@ -112,11 +112,6 @@ CREATE TABLE IF NOT EXISTS stock_snapshots (
   saved_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- （可选）为 symbol 创建索引，加速查询
-CREATE INDEX idx_stock_analyses_symbol ON stock_analyses(symbol);
-CREATE INDEX idx_stock_snapshots_symbol ON stock_snapshots(symbol);
-```
-
 ### 2. 禁用 Row Level Security（RLS）
 
 因为后端使用 Supabase 的 `anon` 密钥（公钥）直接写入，为了简化开发流程，需要临时关闭 RLS：
