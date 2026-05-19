@@ -111,7 +111,7 @@ CREATE TABLE IF NOT EXISTS stock_snapshots (
   stock_data JSONB NOT NULL,
   saved_at TIMESTAMPTZ DEFAULT NOW()
 );
-
+```
 ### 2. 禁用 Row Level Security（RLS）
 
 因为后端使用 Supabase 的 `anon` 密钥（公钥）直接写入，为了简化开发流程，需要临时关闭 RLS：
@@ -183,7 +183,7 @@ AI 给出了两种方案：
 
 **迁移效果**  
 - 部署后所有 API 调用正常，无超时或连接错误。  
-- 股票数据获取成功率 100%，支持更多市场。  
+- 股票数据获取成功率大幅度提高，支持更多市场。  
 - 项目依赖减少（不再需要 baostock 及其依赖的 pandas 旧版本）。
 
 **代码对比（简化示例）**
