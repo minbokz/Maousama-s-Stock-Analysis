@@ -4,12 +4,15 @@ import logging
 import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
+
+import baostock as bs
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
 from dotenv import load_dotenv
+from openai import AsyncOpenAI
 
 load_dotenv()
 
@@ -27,31 +30,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Supabase 初始化
+# ---------- Supabase 初始化 ----------
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_KEY")
+supabase: Optional[Client] = None
+
 if not supabase_url or not supabase_key:
     logger.warning("Supabase credentials missing. Storage disabled.")
-    supabase: Optional[Client] = None
 else:
-    supabase = create_client(supabase_url, supabase_key)
+    try:
+        supabase = create_client(supabase_url, supabase_key)
+        logger.info("Supabase client initialized successfully.")
+    except Exception as e:
+        logger.error(f"Failed to initialize Supabase client: {e}. Check SUPABASE_URL and SUPABASE_KEY.")
+        supabase = None
 
-# DeepSeek 初始化
+# ---------- DeepSeek 初始化 ----------
 deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
+deepseek_client = None
 if not deepseek_api_key:
     logger.warning("DeepSeek API key missing. LLM analysis disabled.")
-    deepseek_client = None
 else:
-    deepseek_client = AsyncOpenAI(
-        api_key=deepseek_api_key,
-        base_url="https://api.deepseek.com/v1"
-    )
+    try:
+        deepseek_client = AsyncOpenAI(
+            api_key=deepseek_api_key,
+            base_url="https://api.deepseek.com/v1"
+        )
+        logger.info("DeepSeek client initialized.")
+    except Exception as e:
+        logger.error(f"Failed to initialize DeepSeek client: {e}")
+        deepseek_client = None
+
 
 class AnalyzeRequest(BaseModel):
     symbol: str
 
+
 class SaveStockRequest(BaseModel):
     symbol: str
+
 
 def format_stock_code(symbol: str) -> tuple[Optional[str], Optional[str]]:
     """将用户输入的股票代码转换为 BaoStock 格式，同时返回市场标识"""
@@ -75,6 +92,7 @@ def format_stock_code(symbol: str) -> tuple[Optional[str], Optional[str]]:
         else:
             return f"sz.{symbol}", "sz"
     return None, None
+
 
 async def fetch_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
     """使用 BaoStock 获取股票数据，包含公司名称、市盈率、流通市值及30天历史数据"""
@@ -154,7 +172,6 @@ async def fetch_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
                     break
 
             if profit_data is not None:
-                # 注意：Baostock 返回的 totalShare / liqaShare 单位可能是“股”（通过实测确认）
                 if 'totalShare' in profit_data and profit_data['totalShare'] not in ('', None, '--'):
                     try:
                         total_shares = float(profit_data['totalShare'])
@@ -225,7 +242,8 @@ async def fetch_stock_data(symbol: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Async fetch error: {e}")
         return None
-        
+
+
 async def analyze_with_llm(stock_data: Dict[str, Any]) -> Dict[str, str]:
     if not deepseek_client:
         raise HTTPException(status_code=503, detail="LLM service not configured")
@@ -287,12 +305,14 @@ Output ONLY the JSON object. Example:
         logger.error(f"LLM analysis error: {e}")
         raise HTTPException(status_code=500, detail=f"LLM analysis failed: {str(e)}")
 
+
 @app.get("/api/stock/{symbol}")
 async def get_stock(symbol: str):
     data = await fetch_stock_data(symbol)
     if not data or data.get('current_price') is None:
         raise HTTPException(status_code=404, detail="Stock symbol not found. Please try another symbol.")
     return data
+
 
 @app.post("/api/analyze")
 async def analyze_stock(req: AnalyzeRequest):
@@ -321,6 +341,7 @@ async def analyze_stock(req: AnalyzeRequest):
     
     return analysis
 
+
 @app.post("/api/save_stock")
 async def save_stock_data(req: SaveStockRequest):
     symbol = req.symbol.upper()
@@ -344,6 +365,7 @@ async def save_stock_data(req: SaveStockRequest):
         logger.error(f"Supabase save error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to save stock data: {str(e)}")
 
+
 @app.get("/health")
 async def health():
     deps = {
@@ -353,9 +375,11 @@ async def health():
     }
     return {"status": "ok", "dependencies": deps}
 
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return HTML_CONTENT
+
 
 # ---------- 前端 HTML ----------
 HTML_CONTENT = """
